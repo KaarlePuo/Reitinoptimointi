@@ -1,37 +1,22 @@
 # ============================================
-# app.py
-# Streamlit UI – Kauppareitin optimointi
+# app.py — WOW++ Streamlit demo
+# Kauppareitin optimointi käytävillä (BFS)
+# Baseline vs Nearest Neighbor vs NN + 2-opt
+# + Overlay, animaatio, KPI:t, export, pitch
 # ============================================
-# - Etäisyys lasketaan käytävillä (ei hyllyjen läpi)
-# - Näyttää Baseline vs Nearest Neighbor vs NN+2-opt
-# - Näyttää myös metrit + arvioitu aika
-# ============================================
+
+import time
+from pathlib import Path
+from collections import deque
 
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from pathlib import Path
-from collections import deque
-
 # --------------------------------------------
 # Streamlit config (vain kerran ja ennen muuta)
 # --------------------------------------------
 st.set_page_config(page_title="Reitinoptimointi", layout="wide")
-
-# --------------------------------------------
-# Aika-arvion oletukset
-# --------------------------------------------
-STEP_METERS = 1.0        # 1 grid-askel = 1 metri (oletus)
-WALK_SPEED_M_S = 1.3     # kävelynopeus m/s (oletus)
-
-
-def format_seconds(seconds: float) -> str:
-    """Palauttaa ajan muodossa mm:ss."""
-    seconds = int(round(seconds))
-    m = seconds // 60
-    s = seconds % 60
-    return f"{m:02d}:{s:02d}"
 
 
 # --------------------------------------------
@@ -185,30 +170,81 @@ def two_opt(route, walkable, max_passes=10):
 
 
 # --------------------------------------------
+# Helpers
+# --------------------------------------------
+def format_seconds(seconds: float) -> str:
+    seconds = int(round(seconds))
+    m = seconds // 60
+    s = seconds % 60
+    return f"{m:02d}:{s:02d}"
+
+
+def to_route_df(route):
+    return pd.DataFrame(
+        [{"order": i, "name": name, "x": x, "y": y} for i, (name, x, y) in enumerate(route)]
+    )
+
+
+# --------------------------------------------
 # Plot
 # --------------------------------------------
-def plot_route(grid, route, path, title, path_label="Reitti", path_color=None):
-    """Piirtää käveltävät ruudut, hyllyt, polun ja pysähdykset."""
-    fig, ax = plt.subplots(figsize=(7, 5))
-
+def plot_base_grid(ax, grid):
+    """Piirtää käytävät + hyllyt samaan akseliin."""
     walk = grid[grid["walkable"] == 1]
     walls = grid[grid["walkable"] == 0]
 
     ax.scatter(walk["x"], walk["y"], s=10, label="Käytävä")
     ax.scatter(walls["x"], walls["y"], s=25, color="black", label="Hylly")
-
-    px = [p[0] for p in path]
-    py = [p[1] for p in path]
-    ax.plot(px, py, linewidth=2, label=path_label, color=path_color)
-
-    for i, (name, x, y) in enumerate(route):
-        ax.scatter(x, y, marker="X", s=120)
-        ax.text(x + 0.1, y + 0.1, f"{i}:{name}", fontsize=9)
-
-    ax.set_title(title)
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.grid(True)
+
+
+def plot_path(ax, path, label, color=None, lw=2.5, alpha=1.0):
+    px = [p[0] for p in path]
+    py = [p[1] for p in path]
+    ax.plot(px, py, linewidth=lw, label=label, color=color, alpha=alpha)
+
+
+def plot_points(ax, route, show_labels=True):
+    for i, (name, x, y) in enumerate(route):
+        ax.scatter(x, y, marker="X", s=120)
+        if show_labels:
+            ax.text(x + 0.12, y + 0.12, f"{i}:{name}", fontsize=9)
+
+
+def fig_overlay(grid, nn_route, nn_path, opt_route, opt_path, title, show_labels=True):
+    fig, ax = plt.subplots(figsize=(8.2, 6.0))
+    plot_base_grid(ax, grid)
+    plot_path(ax, nn_path, "NN", color="tab:blue", lw=2.8, alpha=0.8)
+    plot_path(ax, opt_path, "2-opt", color="tab:green", lw=2.8, alpha=0.8)
+    plot_points(ax, opt_route, show_labels=show_labels)
+    ax.set_title(title)
+    ax.legend()
+    return fig
+
+
+def fig_single(grid, route, path, title, label, color=None, show_labels=True):
+    fig, ax = plt.subplots(figsize=(8.2, 6.0))
+    plot_base_grid(ax, grid)
+    plot_path(ax, path, label=label, color=color, lw=2.8)
+    plot_points(ax, route, show_labels=show_labels)
+    ax.set_title(title)
+    ax.legend()
+    return fig
+
+
+def fig_animated(grid, route, path, title, label, color=None, show_labels=True, upto=0):
+    """Piirtää polun vain osittain (animaatio sliderilla)."""
+    fig, ax = plt.subplots(figsize=(8.2, 6.0))
+    plot_base_grid(ax, grid)
+
+    upto = max(1, min(upto, len(path)))
+    partial = path[:upto]
+    plot_path(ax, partial, label=label, color=color, lw=3.2)
+
+    plot_points(ax, route, show_labels=show_labels)
+    ax.set_title(title)
     ax.legend()
     return fig
 
@@ -216,8 +252,8 @@ def plot_route(grid, route, path, title, path_label="Reitti", path_color=None):
 # ============================================
 # UI
 # ============================================
-st.title("🛒 Reitinoptimointi")
-st.write("Valitse tuotteet ja paina **Optimoi reitti**. Etäisyys lasketaan käytävillä (ei hyllyjen läpi).")
+st.title("🛒 Reitinoptimointi — WOW++ demo")
+st.caption("Grid-käytävät + BFS-etäisyys | Baseline vs NN vs NN+2-opt | Overlay + animaatio + export")
 
 products, points, grid = load_data()
 walkable = build_walkable_set(grid)
@@ -235,19 +271,29 @@ selected = st.sidebar.multiselect(
     options=sorted(products["product"].unique()),
     default=["Maito", "Leipä", "Pasta", "Kahvi"],
 )
-show_baseline = st.sidebar.checkbox("Näytä baseline", value=False)
+
+st.sidebar.header("Mallin asetukset")
+max_passes = st.sidebar.slider("2-opt passit", min_value=1, max_value=60, value=15, step=1)
+step_meters = st.sidebar.slider("Askel → metri", min_value=0.2, max_value=2.0, value=1.0, step=0.1)
+walk_speed = st.sidebar.slider("Kävelynopeus (m/s)", min_value=0.6, max_value=2.0, value=1.3, step=0.1)
+
+st.sidebar.header("Näyttö")
+show_baseline = st.sidebar.checkbox("Näytä baseline (expander)", value=False)
+show_labels = st.sidebar.checkbox("Näytä pisteiden nimet kartalla", value=True)
+show_overlay = st.sidebar.checkbox("Näytä overlay-kartta (NN + 2-opt)", value=True)
 
 # Session state
 if "results" not in st.session_state:
     st.session_state["results"] = None
+if "autoplay" not in st.session_state:
+    st.session_state["autoplay"] = False
 
-# --- Laske reitit napista ---
+# Action
 if st.sidebar.button("Optimoi reitti"):
     if not selected:
         st.warning("Valitse ainakin yksi tuote.")
         st.session_state["results"] = None
     else:
-        # säilytä käyttäjän valitsema järjestys
         df_sel = pd.DataFrame({"product": selected})
         items = df_sel.merge(products, on="product", how="left")
 
@@ -257,103 +303,222 @@ if st.sidebar.button("Optimoi reitti"):
             st.session_state["results"] = None
         else:
             stops = [(r.product, int(r.x), int(r.y)) for r in items.itertuples(index=False)]
-
-            # Yksi cache per laskenta (nopeuttaa BFS-etäisyyksiä)
             dist_cache = {}
 
             # Baseline
             baseline_route = [entrance] + stops + [checkout]
             baseline_path = build_full_path(baseline_route, walkable)
-            baseline_dist = route_distance_cached(baseline_route, walkable, cache=dist_cache)
+            baseline_steps = route_distance_cached(baseline_route, walkable, cache=dist_cache)
 
-            # Nearest Neighbor
+            # NN
             nn_route = nearest_neighbor(entrance, stops, checkout, walkable)
             nn_path = build_full_path(nn_route, walkable)
-            nn_dist = route_distance_cached(nn_route, walkable, cache=dist_cache)
+            nn_steps = route_distance_cached(nn_route, walkable, cache=dist_cache)
 
             # NN + 2-opt
-            opt_route, opt_dist = two_opt(nn_route, walkable, max_passes=10)
+            opt_route, opt_steps = two_opt(nn_route, walkable, max_passes=max_passes)
             opt_path = build_full_path(opt_route, walkable)
 
-            # Säästöt
-            s_nn = baseline_dist - nn_dist
-            s_opt = baseline_dist - opt_dist
-            s_nn_pct = (s_nn / baseline_dist) * 100 if baseline_dist else 0
-            s_opt_pct = (s_opt / baseline_dist) * 100 if baseline_dist else 0
+            # KPI calc
+            baseline_m = baseline_steps * step_meters
+            nn_m = nn_steps * step_meters
+            opt_m = opt_steps * step_meters
+
+            baseline_t = baseline_m / walk_speed
+            nn_t = nn_m / walk_speed
+            opt_t = opt_m / walk_speed
+
+            s_nn_m = baseline_m - nn_m
+            s_opt_m = baseline_m - opt_m
+            s_nn_pct = (s_nn_m / baseline_m) * 100 if baseline_m else 0
+            s_opt_pct = (s_opt_m / baseline_m) * 100 if baseline_m else 0
 
             st.session_state["results"] = {
-                "baseline_route": baseline_route,
-                "baseline_path": baseline_path,
-                "baseline_dist": baseline_dist,
-                "nn_route": nn_route,
-                "nn_path": nn_path,
-                "nn_dist": nn_dist,
-                "opt_route": opt_route,
-                "opt_path": opt_path,
-                "opt_dist": opt_dist,
-                "s_nn_pct": s_nn_pct,
-                "s_opt_pct": s_opt_pct,
+                "baseline": {
+                    "route": baseline_route,
+                    "path": baseline_path,
+                    "steps": baseline_steps,
+                    "meters": baseline_m,
+                    "time_s": baseline_t,
+                },
+                "nn": {
+                    "route": nn_route,
+                    "path": nn_path,
+                    "steps": nn_steps,
+                    "meters": nn_m,
+                    "time_s": nn_t,
+                },
+                "opt": {
+                    "route": opt_route,
+                    "path": opt_path,
+                    "steps": opt_steps,
+                    "meters": opt_m,
+                    "time_s": opt_t,
+                },
+                "savings": {
+                    "nn_m": s_nn_m,
+                    "opt_m": s_opt_m,
+                    "nn_pct": s_nn_pct,
+                    "opt_pct": s_opt_pct,
+                },
+                "settings": {
+                    "max_passes": max_passes,
+                    "step_meters": step_meters,
+                    "walk_speed": walk_speed,
+                }
             }
+            st.session_state["autoplay"] = False
 
-# --- Renderöinti ---
+# Render
 res = st.session_state["results"]
-
 if res is None:
     st.info("Valitse tuotteet vasemmalta ja paina **Optimoi reitti**.")
-else:
-    # Matka metreinä ja aika sekunteina (lasketaan vasta kun res on olemassa)
-    baseline_m = res["baseline_dist"] * STEP_METERS
-    nn_m = res["nn_dist"] * STEP_METERS
-    opt_m = res["opt_dist"] * STEP_METERS
+    st.stop()
 
-    baseline_t = baseline_m / WALK_SPEED_M_S
-    nn_t = nn_m / WALK_SPEED_M_S
-    opt_t = opt_m / WALK_SPEED_M_S
+# KPI row
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Baseline", f'{res["baseline"]["meters"]:.0f} m', format_seconds(res["baseline"]["time_s"]))
+k2.metric("Nearest Neighbor", f'{res["nn"]["meters"]:.0f} m', f'-{res["savings"]["nn_m"]:.0f} m ({res["savings"]["nn_pct"]:.1f}%)')
+k3.metric("NN + 2-opt", f'{res["opt"]["meters"]:.0f} m', f'-{res["savings"]["opt_m"]:.0f} m ({res["savings"]["opt_pct"]:.1f}%)')
+k4.metric("Arvioitu ajansäästö", format_seconds(res["baseline"]["time_s"] - res["opt"]["time_s"]))
 
-    st.subheader("📏 Mittarit")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Baseline", f"{baseline_m:.0f} m", format_seconds(baseline_t))
-    m2.metric("Nearest Neighbor", f"{nn_m:.0f} m", f"-{format_seconds(baseline_t - nn_t)} ({res['s_nn_pct']:.1f}%)")
-    m3.metric("NN + 2-opt", f"{opt_m:.0f} m", f"-{format_seconds(baseline_t - opt_t)} ({res['s_opt_pct']:.1f}%)")
+tabs = st.tabs(["✨ Wow-näkymä", "🗺️ Kartat", "🎬 Animaatio", "🧾 Reitit", "⚙️ Data"])
 
-    st.subheader("🗺️ Reittivertailu (2 karttaa)")
-    left, right = st.columns(2)
+with tabs[0]:
+    st.subheader("✨ Wow-näkymä (overlay + pitch + vertailu)")
+    left, right = st.columns([1.15, 0.85])
 
     with left:
-        st.subheader("Nearest Neighbor")
-        st.pyplot(
-            plot_route(
+        if show_overlay:
+            fig = fig_overlay(
                 grid,
-                res["nn_route"],
-                res["nn_path"],
-                f'Nearest Neighbor (distance = {res["nn_dist"]})',
-                path_label="NN",
-                path_color="tab:blue",
+                res["nn"]["route"], res["nn"]["path"],
+                res["opt"]["route"], res["opt"]["path"],
+                title="Overlay: NN (sininen) vs 2-opt (vihreä)",
+                show_labels=show_labels,
             )
-        )
+            st.pyplot(fig)
+        else:
+            st.info("Laita sivupalkista päälle: **Näytä overlay-kartta**")
 
     with right:
-        st.subheader("NN + 2-opt")
-        st.pyplot(
-            plot_route(
-                grid,
-                res["opt_route"],
-                res["opt_path"],
-                f'NN + 2-opt (distance = {res["opt_dist"]})',
-                path_label="2-opt",
-                path_color="tab:green",
-            )
+        st.markdown("### 📌 Pitch (copy/paste)")
+        pitch = (
+            f"- Optimoin ostosreitin kaupassa käytävillä (grid + BFS).\n"
+            f"- Vertailu: Baseline vs Nearest Neighbor vs NN+2-opt.\n"
+            f"- Tulos: säästö {res['savings']['opt_m']:.0f} m ({res['savings']['opt_pct']:.1f}%), "
+            f"arvioitu ajansäästö {format_seconds(res['baseline']['time_s'] - res['opt']['time_s'])}.\n"
+            f"- Parametrit: 2-opt passit={res['settings']['max_passes']}, askel→m={res['settings']['step_meters']}, kävely={res['settings']['walk_speed']} m/s."
+        )
+        st.code(pitch, language="text")
+
+        st.markdown("### 🧠 Mitä algoritmit tekee?")
+        st.write(
+            "- **Baseline**: käy tuotteet siinä järjestyksessä kuin valitsit.\n"
+            "- **Nearest Neighbor**: valitsee aina seuraavaksi lähimmän tuotteen (ahne).\n"
+            "- **2-opt**: yrittää parantaa reittiä vaihtamalla/reversoimalla välejä (local search)."
         )
 
+with tabs[1]:
+    st.subheader("🗺️ Kartat")
+    colA, colB = st.columns(2)
+
+    with colA:
+        st.pyplot(fig_single(
+            grid, res["nn"]["route"], res["nn"]["path"],
+            title=f"Nearest Neighbor ({res['nn']['steps']} steps)",
+            label="NN", color="tab:blue", show_labels=show_labels
+        ))
+
+    with colB:
+        st.pyplot(fig_single(
+            grid, res["opt"]["route"], res["opt"]["path"],
+            title=f"NN + 2-opt ({res['opt']['steps']} steps)",
+            label="2-opt", color="tab:green", show_labels=show_labels
+        ))
+
     if show_baseline:
-        with st.expander("Baseline"):
-            st.pyplot(
-                plot_route(
-                    grid,
-                    res["baseline_route"],
-                    res["baseline_path"],
-                    f'Baseline (distance = {res["baseline_dist"]})',
-                    path_label="Baseline",
-                    path_color="tab:gray",
-                )
-            )
+        with st.expander("Näytä Baseline"):
+            st.pyplot(fig_single(
+                grid, res["baseline"]["route"], res["baseline"]["path"],
+                title=f"Baseline ({res['baseline']['steps']} steps)",
+                label="Baseline", color="tab:gray", show_labels=show_labels
+            ))
+
+with tabs[2]:
+    st.subheader("🎬 Reittianimaatio (2-opt)")
+    path = res["opt"]["path"]
+    n = len(path)
+
+    # Autoplay controls
+    a1, a2, a3 = st.columns([0.22, 0.22, 0.56])
+    with a1:
+        if st.button("▶️ Play"):
+            st.session_state["autoplay"] = True
+    with a2:
+        if st.button("⏸ Pause"):
+            st.session_state["autoplay"] = False
+    with a3:
+        speed_ms = st.slider("Nopeus (ms / frame)", min_value=30, max_value=400, value=120, step=10)
+
+    # Frame slider
+    frame = st.slider("Frame", min_value=1, max_value=n, value=min(40, n), step=1)
+
+    # Autoplay loop: rerun by toggling session_state
+    if st.session_state["autoplay"]:
+        frame = min(frame + 1, n)
+        # Hack: keep slider value in session_state
+        st.session_state["_frame_override"] = frame
+        time.sleep(speed_ms / 1000.0)
+        st.rerun()
+
+    # Apply override once (so slider can move)
+    if "_frame_override" in st.session_state:
+        frame = st.session_state.pop("_frame_override")
+
+    st.pyplot(fig_animated(
+        grid, res["opt"]["route"], res["opt"]["path"],
+        title=f"2-opt reitti (frame {frame}/{n})",
+        label="2-opt", color="tab:green", show_labels=show_labels, upto=frame
+    ))
+
+with tabs[3]:
+    st.subheader("🧾 Reitit ja export")
+
+    r1, r2 = st.columns(2)
+    with r1:
+        st.markdown("#### Optimoitu reitti (2-opt)")
+        df_opt = to_route_df(res["opt"]["route"])
+        st.dataframe(df_opt, use_container_width=True)
+
+        st.download_button(
+            "⬇️ Lataa optimoitu reitti CSV:nä",
+            data=df_opt.to_csv(index=False).encode("utf-8"),
+            file_name="optimized_route.csv",
+            mime="text/csv",
+        )
+
+    with r2:
+        st.markdown("#### Nearest Neighbor reitti")
+        df_nn = to_route_df(res["nn"]["route"])
+        st.dataframe(df_nn, use_container_width=True)
+
+        st.download_button(
+            "⬇️ Lataa NN reitti CSV:nä",
+            data=df_nn.to_csv(index=False).encode("utf-8"),
+            file_name="nn_route.csv",
+            mime="text/csv",
+        )
+
+with tabs[4]:
+    st.subheader("⚙️ Data")
+    st.json(res["settings"])
+
+    with st.expander("Näytä products.csv"):
+        st.dataframe(products, use_container_width=True)
+
+    with st.expander("Näytä store_points.csv"):
+        st.dataframe(points, use_container_width=True)
+
+    with st.expander("Näytä store_grid.csv (head 200)"):
+        st.dataframe(grid.head(200), use_container_width=True)
