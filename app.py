@@ -198,8 +198,7 @@ def plot_route(grid, route, path, title):
 # UI
 # ============================================
 st.title("🛒 Reitinoptimointi")
-st.write("Valitse tuotteet ja optimoi reitti. Etäisyys lasketaan käytävillä (ei hyllyjen läpi).")
-st.write("✅ UI version: baseline vs NN vs 2-opt")
+st.write("Valitse tuotteet ja optimoi reitti.")
 
 products, points, grid = load_data()
 walkable = build_walkable_set(grid)
@@ -217,6 +216,8 @@ selected = st.sidebar.multiselect(
     options=sorted(products["product"].unique()),
     default=["Maito", "Leipä", "Pasta", "Kahvi"],
 )
+
+show_baseline = st.sidebar.checkbox("Näytä baseline kartta", value=False)
 
 if st.sidebar.button("Optimoi reitti"):
     if not selected:
@@ -260,20 +261,22 @@ if st.sidebar.button("Optimoi reitti"):
     m2.metric("Nearest Neighbor", f"{nn_dist}  (−{s_nn_pct:.1f}%)")
     m3.metric("NN + 2-opt", f"{opt_dist}  (−{s_opt_pct:.1f}%)")
 
-    # 3 plots side-by-side
-    c1, c2, c3 = st.columns(3)
+    st.subheader("🗺️ Reittivertailu")
 
-    with c1:
-        st.subheader("Baseline")
+left, right = st.columns(2)
+
+with left:
+    st.subheader("Nearest Neighbor")
+    st.pyplot(plot_route(grid, nn_route, nn_path, f"NN (distance = {nn_dist})"))
+
+with right:
+    st.subheader("NN + 2-opt")
+    st.pyplot(plot_route(grid, opt_route, opt_path, f"2-opt (distance = {opt_dist})"))
+
+# Halutessa baseline omaan expanderiin (ei sotke vertailua)
+if show_baseline:
+    with st.expander("Baseline (vertailu)"):
         st.pyplot(plot_route(grid, baseline_route, baseline_path, f"Baseline (distance = {baseline_dist})"))
-
-    with c2:
-        st.subheader("Nearest Neighbor")
-        st.pyplot(plot_route(grid, nn_route, nn_path, f"NN (distance = {nn_dist})"))
-
-    with c3:
-        st.subheader("NN + 2-opt")
-        st.pyplot(plot_route(grid, opt_route, opt_path, f"2-opt (distance = {opt_dist})"))
 
 else:
     st.info("Valitse tuotteet vasemmalta ja paina **Optimoi reitti**.")
