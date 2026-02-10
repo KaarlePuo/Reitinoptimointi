@@ -1,0 +1,11 @@
+product_id,product,category,x,y
+1,Maito,perus,2,8
+2,Leipä,perus,2,2
+3,Kananmunat,perus,4,2
+4,Banaani,hedelmä,6,2
+5,Pasta,kuiva,8,2
+6,Tomaattimurska,kuiva,8,4
+7,Kahvi,kuiva,8,6
+8,Jäätelö,pakaste,10,8
+9,Herne-maissi-paprika,pakaste,10,6
+10,Jogurtti,kylmä,4,8
