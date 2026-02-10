@@ -4,6 +4,7 @@
 # ============================================
 # - Etäisyys lasketaan käytävillä (ei hyllyjen läpi)
 # - Näyttää Baseline vs Nearest Neighbor vs NN+2-opt
+# - Näyttää myös metrit + arvioitu aika
 # ============================================
 
 import streamlit as st
@@ -17,6 +18,21 @@ from collections import deque
 # Streamlit config (vain kerran ja ennen muuta)
 # --------------------------------------------
 st.set_page_config(page_title="Reitinoptimointi", layout="wide")
+
+# --------------------------------------------
+# Aika-arvion oletukset
+# --------------------------------------------
+STEP_METERS = 1.0        # 1 grid-askel = 1 metri (oletus)
+WALK_SPEED_M_S = 1.3     # kävelynopeus m/s (oletus)
+
+
+def format_seconds(seconds: float) -> str:
+    """Palauttaa ajan muodossa mm:ss."""
+    seconds = int(round(seconds))
+    m = seconds // 60
+    s = seconds % 60
+    return f"{m:02d}:{s:02d}"
+
 
 # --------------------------------------------
 # Data
@@ -131,7 +147,10 @@ def nearest_neighbor(start, stops, end, walkable):
     cur = start
 
     while remaining:
-        nxt = min(remaining, key=lambda s: shortest_path_length(cur[1:], s[1:], walkable))
+        nxt = min(
+            remaining,
+            key=lambda s: shortest_path_length(cur[1:], s[1:], walkable)
+        )
         route.append(nxt)
         remaining.remove(nxt)
         cur = nxt
@@ -168,7 +187,7 @@ def two_opt(route, walkable, max_passes=10):
 # --------------------------------------------
 # Plot
 # --------------------------------------------
-def plot_route(grid, route, path, title):
+def plot_route(grid, route, path, title, path_label="Reitti", path_color=None):
     """Piirtää käveltävät ruudut, hyllyt, polun ja pysähdykset."""
     fig, ax = plt.subplots(figsize=(7, 5))
 
@@ -180,7 +199,7 @@ def plot_route(grid, route, path, title):
 
     px = [p[0] for p in path]
     py = [p[1] for p in path]
-    ax.plot(px, py, linewidth=2)
+    ax.plot(px, py, linewidth=2, label=path_label, color=path_color)
 
     for i, (name, x, y) in enumerate(route):
         ax.scatter(x, y, marker="X", s=120)
@@ -193,10 +212,10 @@ def plot_route(grid, route, path, title):
     ax.legend()
     return fig
 
-# ============================================
-# UI (KOKONAAN UUSI, TURVALLINEN)
-# ============================================
 
+# ============================================
+# UI
+# ============================================
 st.title("🛒 Reitinoptimointi")
 st.write("Valitse tuotteet ja paina **Optimoi reitti**. Etäisyys lasketaan käytävillä (ei hyllyjen läpi).")
 
@@ -218,7 +237,7 @@ selected = st.sidebar.multiselect(
 )
 show_baseline = st.sidebar.checkbox("Näytä baseline", value=False)
 
-# Session state (tulokset säilytetään reruneissa)
+# Session state
 if "results" not in st.session_state:
     st.session_state["results"] = None
 
@@ -228,7 +247,7 @@ if st.sidebar.button("Optimoi reitti"):
         st.warning("Valitse ainakin yksi tuote.")
         st.session_state["results"] = None
     else:
-        # säilytä valittu järjestys
+        # säilytä käyttäjän valitsema järjestys
         df_sel = pd.DataFrame({"product": selected})
         items = df_sel.merge(products, on="product", how="left")
 
@@ -239,15 +258,18 @@ if st.sidebar.button("Optimoi reitti"):
         else:
             stops = [(r.product, int(r.x), int(r.y)) for r in items.itertuples(index=False)]
 
+            # Yksi cache per laskenta (nopeuttaa BFS-etäisyyksiä)
+            dist_cache = {}
+
             # Baseline
             baseline_route = [entrance] + stops + [checkout]
             baseline_path = build_full_path(baseline_route, walkable)
-            baseline_dist = route_distance_cached(baseline_route, walkable, cache={})
+            baseline_dist = route_distance_cached(baseline_route, walkable, cache=dist_cache)
 
             # Nearest Neighbor
             nn_route = nearest_neighbor(entrance, stops, checkout, walkable)
             nn_path = build_full_path(nn_route, walkable)
-            nn_dist = route_distance_cached(nn_route, walkable, cache={})
+            nn_dist = route_distance_cached(nn_route, walkable, cache=dist_cache)
 
             # NN + 2-opt
             opt_route, opt_dist = two_opt(nn_route, walkable, max_passes=10)
@@ -269,23 +291,30 @@ if st.sidebar.button("Optimoi reitti"):
                 "opt_route": opt_route,
                 "opt_path": opt_path,
                 "opt_dist": opt_dist,
-                "s_nn": s_nn,
-                "s_opt": s_opt,
                 "s_nn_pct": s_nn_pct,
                 "s_opt_pct": s_opt_pct,
             }
 
-# --- Renderöinti (EI IKINÄ suoria nn_route-viittauksia) ---
+# --- Renderöinti ---
 res = st.session_state["results"]
 
 if res is None:
     st.info("Valitse tuotteet vasemmalta ja paina **Optimoi reitti**.")
 else:
+    # Matka metreinä ja aika sekunteina (lasketaan vasta kun res on olemassa)
+    baseline_m = res["baseline_dist"] * STEP_METERS
+    nn_m = res["nn_dist"] * STEP_METERS
+    opt_m = res["opt_dist"] * STEP_METERS
+
+    baseline_t = baseline_m / WALK_SPEED_M_S
+    nn_t = nn_m / WALK_SPEED_M_S
+    opt_t = opt_m / WALK_SPEED_M_S
+
     st.subheader("📏 Mittarit")
     m1, m2, m3 = st.columns(3)
-    m1.metric("Baseline", res["baseline_dist"])
-    m2.metric("Nearest Neighbor", f'{res["nn_dist"]} (−{res["s_nn_pct"]:.1f}%)')
-    m3.metric("NN + 2-opt", f'{res["opt_dist"]} (−{res["s_opt_pct"]:.1f}%)')
+    m1.metric("Baseline", f"{baseline_m:.0f} m", format_seconds(baseline_t))
+    m2.metric("Nearest Neighbor", f"{nn_m:.0f} m", f"-{format_seconds(baseline_t - nn_t)} ({res['s_nn_pct']:.1f}%)")
+    m3.metric("NN + 2-opt", f"{opt_m:.0f} m", f"-{format_seconds(baseline_t - opt_t)} ({res['s_opt_pct']:.1f}%)")
 
     st.subheader("🗺️ Reittivertailu (2 karttaa)")
     left, right = st.columns(2)
@@ -298,6 +327,8 @@ else:
                 res["nn_route"],
                 res["nn_path"],
                 f'Nearest Neighbor (distance = {res["nn_dist"]})',
+                path_label="NN",
+                path_color="tab:blue",
             )
         )
 
@@ -309,6 +340,8 @@ else:
                 res["opt_route"],
                 res["opt_path"],
                 f'NN + 2-opt (distance = {res["opt_dist"]})',
+                path_label="2-opt",
+                path_color="tab:green",
             )
         )
 
@@ -320,5 +353,7 @@ else:
                     res["baseline_route"],
                     res["baseline_path"],
                     f'Baseline (distance = {res["baseline_dist"]})',
+                    path_label="Baseline",
+                    path_color="tab:gray",
                 )
             )
